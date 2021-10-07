@@ -79,6 +79,9 @@ if(CONFIG_SOC_ESP32S2)
     ../../components/log/log.c
     ../esp_shared/src/common/esp_system_api.c
     )
+  zephyr_library_sources(
+    src/hal/windowspill_asm.S
+  )
 
   ## WIFI definitions
   if (CONFIG_WIFI_ESP32)

@@ -54,7 +54,7 @@ uint64_t g_wifi_feature_caps;
 
 #include <sys/math_extras.h>
 
-K_HEAP_DEFINE(_esp32_wifi_heap, 50*1024);
+K_HEAP_DEFINE(_esp32_wifi_heap, 80*1024);
 #define _WIFI_HEAP (&_esp32_wifi_heap)
 
 static void *z_heap_aligned_alloc(struct k_heap *heap, size_t align, size_t size)
