@@ -105,6 +105,23 @@ if(CONFIG_SOC_ESP32)
     ../../components/bootloader_support/src/bootloader_common.c
     )
 
+  zephyr_include_directories(
+      ../../components/mbedtls/port/include/
+      ../../components/heap/include/
+      ../../components/esp_pm/include
+  )
+  zephyr_sources(
+    ../../components/mbedtls/port/esp32/bignum.c
+    ../../components/mbedtls/port/aes/block/esp_aes.c
+    #../../components/mbedtls/port/aes/dma/esp_aes.c
+    #../../components/mbedtls/port/aes/dma/esp_aes_gdma_impl.c
+    #../../components/mbedtls/port/aes/dma/esp_aes_crypto_dma_impl.c
+  )
+    zephyr_compile_definitions(
+    	portMUX_TYPE=int
+    	portMUX_INITIALIZER_UNLOCKED=0
+    )
+
   zephyr_sources(
     ../../components/soc/esp32/gpio_periph.c
     ../../components/soc/src/esp32/rtc_clk.c

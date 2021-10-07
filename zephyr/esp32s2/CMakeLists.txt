@@ -35,6 +35,12 @@ if(CONFIG_SOC_ESP32S2)
     ../../components/wpa_supplicant/src
     ../../components/wpa_supplicant/include/esp_supplicant
     ../../components/bootloader_support/include
+    ../../components/bootloader_support/include_bootloader
+    ../../components/spi_flash/include/
+    ../../components/esp_pm/include/
+    ../../components/efuse/include/esp32s2/
+    ../../components/efuse/esp32s2/include
+    ../../components/heap/include/
     )
 
     zephyr_link_libraries(
@@ -159,6 +165,9 @@ if(CONFIG_SOC_ESP32S2)
       CONFIG_WPA3_SAE
       CONFIG_SHA256
       CONFIG_DPP
+      #CONFIG_PARTITION_TABLE_OFFSET=ESP_PARTITION_TABLE_OFFSET
+      CONFIG_PARTITION_TABLE_OFFSET=0x8000
+      CONFIG_SPIRAM_SIZE=CONFIG_ESP_SPIRAM_SIZE
       )
 
     zephyr_link_libraries(
@@ -177,6 +186,16 @@ if(CONFIG_SOC_ESP32S2)
         -Wl,--defsym,net80211_printf=printf
         -Wl,--defsym,coexist_printf=printf
       )
+ 
+    zephyr_sources_ifdef(
+      CONFIG_ESP_SPIRAM
+      ../../components/spi_flash/flash_ops.c
+      ../../components/esp32s2/spiram.c
+      ../../components/esp32s2/spiram_psram.c
+      #../../components/esp32s2/cache_sram_mmu.c
+      #../../components/esp_hw_support/port/esp32s2/rtc_init.c
+      ../../components/bootloader_support/src/bootloader_common.c
+    )
 
   endif() ## CONFIG_WIFI_ESP32
 

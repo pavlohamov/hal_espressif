@@ -51,15 +51,98 @@ struct wifi_spin_lock {
 
 uint64_t g_wifi_feature_caps;
 
+
+#include <sys/math_extras.h>
+
+K_HEAP_DEFINE(_esp32_wifi_heap, 50*1024);
+#define _WIFI_HEAP (&_esp32_wifi_heap)
+
+static void *z_heap_aligned_alloc(struct k_heap *heap, size_t align, size_t size)
+{
+    void *mem;
+    struct k_heap **heap_ref;
+    size_t __align;
+
+    /*
+     * Adjust the size to make room for our heap reference.
+     * Merge a rewind bit with align value (see sys_heap_aligned_alloc()).
+     * This allows for storing the heap pointer right below the aligned
+     * boundary without wasting any memory.
+     */
+    if (size_add_overflow(size, sizeof(heap_ref), &size)) {
+            return NULL;
+    }
+    __align = align | sizeof(heap_ref);
+
+    mem = k_heap_aligned_alloc(heap, __align, size, K_NO_WAIT);
+    if (mem == NULL) {
+            return NULL;
+    }
+
+    heap_ref = mem;
+    *heap_ref = heap;
+    mem = ++heap_ref;
+    __ASSERT(align == 0 || ((uintptr_t)mem & (align - 1)) == 0,
+             "misaligned memory at %p (align = %zu)", mem, align);
+
+    return mem;
+}
+
+
+static inline void *wifi_aligned_alloc(size_t align, size_t size)
+{
+    __ASSERT(align / sizeof(void *) >= 1
+        && (align % sizeof(void *)) == 0,
+        "align must be a multiple of sizeof(void *)");
+
+    __ASSERT((align & (align - 1)) == 0,
+        "align must be a power of 2");
+    return z_heap_aligned_alloc(_WIFI_HEAP, align, size);
+//    return k_heap_aligned_alloc(_WIFI_HEAP, align | sizeof(void *), size, K_NO_WAIT);
+}
+
+static inline void *w_malloc(size_t size)
+{
+    void *ptr = wifi_aligned_alloc(sizeof(void *), size);
+
+    if (ptr == NULL) {
+        LOG_ERR("memory allocation failed %zu", size);
+    }
+    return ptr;
+}
+
+static inline void *w_calloc(size_t nmemb, size_t size)
+{
+    void *ret;
+    size_t bounds;
+
+    if (size_mul_overflow(nmemb, size, &bounds)) {
+        return NULL;
+    }
+
+    ret = w_malloc(bounds);
+    if (ret != NULL) {
+        (void)memset(ret, 0, bounds);
+    }
+
+    return ret;
+}
+
+static inline void w_free(void *ptr)
+{
+    struct k_heap **heap_ref;
+
+    if (ptr != NULL) {
+        heap_ref = ptr;
+        ptr = --heap_ref;
+        k_heap_free(*heap_ref, ptr);
+    }
+}
+
+
 IRAM_ATTR void *wifi_malloc(size_t size)
 {
-	void *ptr = k_malloc(size);
-
-	if (ptr == NULL) {
-		LOG_ERR("memory allocation failed");
-	}
-
-	return ptr;
+    return w_malloc(size);
 }
 
 IRAM_ATTR void *wifi_realloc(void *ptr, size_t size)
@@ -70,7 +153,7 @@ IRAM_ATTR void *wifi_realloc(void *ptr, size_t size)
 
 IRAM_ATTR void *wifi_calloc(size_t n, size_t size)
 {
-	return k_calloc(n, size);
+	return w_calloc(n, size);
 }
 
 static void *IRAM_ATTR wifi_zalloc_wrapper(size_t size)
@@ -88,20 +171,21 @@ wifi_static_queue_t *wifi_create_queue(int queue_len, int item_size)
 {
 	wifi_static_queue_t *queue = NULL;
 
-	queue = (wifi_static_queue_t *)k_malloc(sizeof(wifi_static_queue_t));
+	queue = (wifi_static_queue_t *)w_malloc(sizeof(wifi_static_queue_t));
 	if (!queue) {
+        LOG_ERR("queue allocation failed %zu", sizeof(wifi_static_queue_t));
 		return NULL;
 	}
 
-	wifi_msgq_buffer = k_malloc(queue_len * item_size);
+	wifi_msgq_buffer = w_malloc(queue_len * item_size);
 	if (wifi_msgq_buffer == NULL) {
 		LOG_ERR("msg buffer allocation failed");
 		return NULL;
 	}
 
-	queue->handle = k_malloc(sizeof(struct k_msgq));
+	queue->handle = w_malloc(sizeof(struct k_msgq));
 	if (queue->handle == NULL) {
-		k_free(wifi_msgq_buffer);
+		w_free(wifi_msgq_buffer);
 		LOG_ERR("queue handle allocation failed");
 		return NULL;
 	}
@@ -114,8 +198,8 @@ wifi_static_queue_t *wifi_create_queue(int queue_len, int item_size)
 void wifi_delete_queue(wifi_static_queue_t *queue)
 {
 	if (queue) {
-		k_free(queue->handle);
-		k_free(queue);
+		w_free(queue->handle);
+		w_free(queue);
 	}
 }
 
@@ -140,7 +224,7 @@ static bool IRAM_ATTR env_is_chip_wrapper(void)
 
 static void *spin_lock_create_wrapper(void)
 {
-	struct k_spinlock *wifi_spin_lock = (struct k_spinlock *) k_malloc(sizeof(struct k_spinlock));
+	struct k_spinlock *wifi_spin_lock = (struct k_spinlock *) w_malloc(sizeof(struct k_spinlock));
 
 	return (void *)wifi_spin_lock;
 }
@@ -167,7 +251,7 @@ static void IRAM_ATTR task_yield_from_isr_wrapper(void)
 
 static void *semphr_create_wrapper(uint32_t max, uint32_t init)
 {
-	struct k_sem *sem = (struct k_sem *) k_malloc(sizeof(struct k_sem));
+	struct k_sem *sem = (struct k_sem *) w_malloc(sizeof(struct k_sem));
 
 	k_sem_init(sem, init, max);
 	return (void *) sem;
@@ -175,7 +259,7 @@ static void *semphr_create_wrapper(uint32_t max, uint32_t init)
 
 static void semphr_delete_wrapper(void *semphr)
 {
-	k_free(semphr);
+	w_free(semphr);
 }
 
 static void *wifi_thread_semphr_get_wrapper(void)
@@ -184,7 +268,7 @@ static void *wifi_thread_semphr_get_wrapper(void)
 
 	sem = k_thread_custom_data_get();
 	if (!sem) {
-		sem = (struct k_sem *) k_malloc(sizeof(struct k_sem));
+		sem = (struct k_sem *) w_malloc(sizeof(struct k_sem));
 		k_sem_init(sem, 0, 1);
 		if (sem) {
 			k_thread_custom_data_set(sem);
@@ -220,7 +304,7 @@ static int32_t semphr_give_wrapper(void *semphr)
 
 static void *recursive_mutex_create_wrapper(void)
 {
-	struct k_mutex *my_mutex = (struct k_mutex *) k_malloc(sizeof(struct k_mutex));
+	struct k_mutex *my_mutex = (struct k_mutex *) w_malloc(sizeof(struct k_mutex));
 
 	k_mutex_init(my_mutex);
 	return (void *)my_mutex;
@@ -228,7 +312,7 @@ static void *recursive_mutex_create_wrapper(void)
 
 static void *mutex_create_wrapper(void)
 {
-	struct k_mutex *my_mutex = (struct k_mutex *) k_malloc(sizeof(struct k_mutex));
+	struct k_mutex *my_mutex = (struct k_mutex *) w_malloc(sizeof(struct k_mutex));
 
 	k_mutex_init(my_mutex);
 	return (void *)my_mutex;
@@ -236,7 +320,7 @@ static void *mutex_create_wrapper(void)
 
 static void mutex_delete_wrapper(void *mutex)
 {
-	k_free(mutex);
+	w_free(mutex);
 }
 
 static int32_t IRAM_ATTR mutex_lock_wrapper(void *mutex)
@@ -257,7 +341,7 @@ static int32_t IRAM_ATTR mutex_unlock_wrapper(void *mutex)
 
 static void *queue_create_wrapper(uint32_t queue_len, uint32_t item_size)
 {
-	struct k_queue *queue = (struct k_queue *)k_malloc(sizeof(struct k_queue));
+	struct k_queue *queue = (struct k_queue *)w_malloc(sizeof(struct k_queue));
 
 	if (queue == NULL) {
 		LOG_ERR("queue malloc failed");
@@ -270,7 +354,7 @@ static void *queue_create_wrapper(uint32_t queue_len, uint32_t item_size)
 
 static void delete_wrapper(void *handle)
 {
-	k_free(handle);
+	w_free(handle);
 }
 
 static int32_t queue_send_wrapper(void *queue, void *item, uint32_t block_time_tick)
@@ -416,7 +500,7 @@ static uint32_t esp_clk_slowclk_cal_get_wrapper(void)
 
 static void *IRAM_ATTR malloc_internal_wrapper(size_t size)
 {
-	void *ptr = k_malloc(size);
+	void *ptr = w_malloc(size);
 
 	if (ptr == NULL) {
 		LOG_ERR("malloc failed");
@@ -432,7 +516,7 @@ static void *IRAM_ATTR realloc_internal_wrapper(void *ptr, size_t size)
 
 static void *IRAM_ATTR calloc_internal_wrapper(size_t n, size_t size)
 {
-	return k_calloc(n, size);
+	return w_calloc(n, size);
 }
 
 static void *IRAM_ATTR zalloc_internal_wrapper(size_t size)
@@ -775,7 +859,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._ints_off = intr_off,
 	._is_from_isr = k_is_in_isr,
 	._spin_lock_create = spin_lock_create_wrapper,
-	._spin_lock_delete = k_free,
+	._spin_lock_delete = w_free,
 	._wifi_int_disable = wifi_int_disable_wrapper,
 	._wifi_int_restore = wifi_int_restore_wrapper,
 	._task_yield_from_isr = task_yield_from_isr_wrapper,
@@ -809,8 +893,8 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._task_ms_to_tick = task_ms_to_tick_wrapper,
 	._task_get_current_task = (void *(*)(void))xTaskGetCurrentTaskHandle,
 	._task_get_max_priority = task_get_max_priority_wrapper,
-	._malloc = k_malloc,
-	._free = k_free,
+	._malloc = w_malloc,
+	._free = w_free,
 	._event_post = esp_event_post_wrapper,
 	._get_free_heap_size = esp_get_free_heap_size,
 	._rand = sys_rand32_get,

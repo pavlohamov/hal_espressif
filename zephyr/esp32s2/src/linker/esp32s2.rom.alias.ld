@@ -22,3 +22,8 @@ PROVIDE ( esp_rom_cache_set_idrom_mmu_size = Cache_Set_IDROM_MMU_Size );
 PROVIDE ( esp_rom_g_ticks_per_us_pro = g_ticks_per_us_pro );
 PROVIDE ( esp_rom_gpio_matrix_in = gpio_matrix_in );
 PROVIDE ( esp_rom_gpio_matrix_out = gpio_matrix_out );
+
+PROVIDE ( xthal_window_spill = 0x40026988 );
+PROVIDE ( xthal_window_spill_nw = 0x40026874 );
+
+
