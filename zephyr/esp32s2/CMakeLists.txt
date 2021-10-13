@@ -168,9 +168,6 @@ if(CONFIG_SOC_ESP32S2)
       CONFIG_WPA3_SAE
       CONFIG_SHA256
       CONFIG_DPP
-      #CONFIG_PARTITION_TABLE_OFFSET=ESP_PARTITION_TABLE_OFFSET
-      CONFIG_PARTITION_TABLE_OFFSET=0x8000
-      CONFIG_SPIRAM_SIZE=CONFIG_ESP_SPIRAM_SIZE
       )
 
     zephyr_link_libraries(
@@ -189,7 +186,15 @@ if(CONFIG_SOC_ESP32S2)
         -Wl,--defsym,net80211_printf=printf
         -Wl,--defsym,coexist_printf=printf
       )
+
+  endif() ## CONFIG_WIFI_ESP32
  
+ 
+    zephyr_compile_definitions(
+      #CONFIG_PARTITION_TABLE_OFFSET=ESP_PARTITION_TABLE_OFFSET
+      CONFIG_PARTITION_TABLE_OFFSET=0x8000
+      CONFIG_SPIRAM_SIZE=CONFIG_ESP_SPIRAM_SIZE
+    )
     zephyr_sources_ifdef(
       CONFIG_ESP_SPIRAM
       ../../components/spi_flash/flash_ops.c
@@ -199,7 +204,5 @@ if(CONFIG_SOC_ESP32S2)
       #../../components/esp_hw_support/port/esp32s2/rtc_init.c
       ../../components/bootloader_support/src/bootloader_common.c
     )
-
-  endif() ## CONFIG_WIFI_ESP32
 
 endif()
