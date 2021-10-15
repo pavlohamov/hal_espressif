@@ -166,23 +166,23 @@ wifi_static_queue_t *wifi_create_queue(int queue_len, int item_size)
 {
 	wifi_static_queue_t *queue = NULL;
 
-	queue = (wifi_static_queue_t *)w_malloc(sizeof(wifi_static_queue_t));
+	queue = (wifi_static_queue_t *)k_malloc(sizeof(wifi_static_queue_t));
 	if (!queue) {
         LOG_ERR("queue allocation failed %zu", sizeof(wifi_static_queue_t));
 		return NULL;
 	}
 
-	queue->storage = w_malloc(queue_len * item_size);
+	queue->storage = k_malloc(queue_len * item_size);
 	if (queue->storage == NULL) {
-        w_free(queue);
+        k_free(queue);
 		LOG_ERR("msg buffer allocation failed");
 		return NULL;
 	}
 
-	queue->handle = w_malloc(sizeof(struct k_msgq));
+	queue->handle = k_malloc(sizeof(struct k_msgq));
 	if (queue->handle == NULL) {
-		w_free(queue->storage);
-        w_free(queue);
+	    k_free(queue->storage);
+	    k_free(queue);
 		LOG_ERR("queue handle allocation failed");
 		return NULL;
 	}
@@ -195,9 +195,9 @@ wifi_static_queue_t *wifi_create_queue(int queue_len, int item_size)
 void wifi_delete_queue(wifi_static_queue_t *queue)
 {
 	if (queue) {
-        w_free(queue->storage);
-		w_free(queue->handle);
-		w_free(queue);
+        k_free(queue->storage);
+        k_free(queue->handle);
+        k_free(queue);
 	}
 }
 
@@ -222,7 +222,7 @@ static bool IRAM_ATTR env_is_chip_wrapper(void)
 
 static void *spin_lock_create_wrapper(void)
 {
-	struct k_spinlock *wifi_spin_lock = (struct k_spinlock *) w_malloc(sizeof(struct k_spinlock));
+	struct k_spinlock *wifi_spin_lock = (struct k_spinlock *) k_calloc(1, sizeof(struct k_spinlock));
 	if (!wifi_spin_lock) {
 	    LOG_ERR("SpinLock alloc");
 	    return NULL;
@@ -253,7 +253,7 @@ static void IRAM_ATTR task_yield_from_isr_wrapper(void)
 
 static void *semphr_create_wrapper(uint32_t max, uint32_t init)
 {
-	struct k_sem *sem = (struct k_sem *) w_malloc(sizeof(struct k_sem));
+	struct k_sem *sem = (struct k_sem *) k_malloc(sizeof(struct k_sem));
     if (!sem) {
         LOG_ERR("k_sem alloc");
         return NULL;
@@ -263,18 +263,13 @@ static void *semphr_create_wrapper(uint32_t max, uint32_t init)
 	return (void *) sem;
 }
 
-static void semphr_delete_wrapper(void *semphr)
-{
-	w_free(semphr);
-}
-
 static void *wifi_thread_semphr_get_wrapper(void)
 {
 	struct k_sem *sem = NULL;
 
 	sem = k_thread_custom_data_get();
 	if (!sem) {
-		sem = (struct k_sem *) w_malloc(sizeof(struct k_sem));
+		sem = (struct k_sem *) k_malloc(sizeof(struct k_sem));
 	    if (!sem) {
 	        LOG_ERR("k_sem alloc");
 	    }
@@ -313,7 +308,7 @@ static int32_t semphr_give_wrapper(void *semphr)
 
 static void *recursive_mutex_create_wrapper(void)
 {
-	struct k_mutex *my_mutex = (struct k_mutex *) w_malloc(sizeof(struct k_mutex));
+	struct k_mutex *my_mutex = (struct k_mutex *) k_malloc(sizeof(struct k_mutex));
     if (!my_mutex) {
         LOG_ERR("k_mutex alloc");
         return NULL;
@@ -325,7 +320,7 @@ static void *recursive_mutex_create_wrapper(void)
 
 static void *mutex_create_wrapper(void)
 {
-	struct k_mutex *my_mutex = (struct k_mutex *) w_malloc(sizeof(struct k_mutex));
+	struct k_mutex *my_mutex = (struct k_mutex *) k_malloc(sizeof(struct k_mutex));
     if (!my_mutex) {
         LOG_ERR("k_mutex alloc");
         return NULL;
@@ -333,11 +328,6 @@ static void *mutex_create_wrapper(void)
 
 	k_mutex_init(my_mutex);
 	return (void *)my_mutex;
-}
-
-static void mutex_delete_wrapper(void *mutex)
-{
-	w_free(mutex);
 }
 
 static int32_t IRAM_ATTR mutex_lock_wrapper(void *mutex)
@@ -358,7 +348,7 @@ static int32_t IRAM_ATTR mutex_unlock_wrapper(void *mutex)
 
 static void *queue_create_wrapper(uint32_t queue_len, uint32_t item_size)
 {
-	struct k_queue *queue = (struct k_queue *)w_malloc(sizeof(struct k_queue) + item_size * queue_len);
+	struct k_queue *queue = (struct k_queue *)k_malloc(sizeof(struct k_queue) + item_size * queue_len);
 	void *buf = queue + 1;
 
 	if (queue == NULL) {
@@ -367,33 +357,28 @@ static void *queue_create_wrapper(uint32_t queue_len, uint32_t item_size)
 	}
 
 	k_msgq_init((struct k_msgq *)queue, buf, item_size, queue_len);
+    LOG_ERR("\t \t Queue %p", queue);
+    esp_rom_printf("\t \t Queue %p", queue);
 	return (void *)queue;
-}
-
-static void delete_wrapper(void *handle)
-{
-	w_free(handle);
 }
 
 static int32_t queue_send_wrapper(void *queue, void *item, uint32_t block_time_tick)
 {
-	if (block_time_tick == OSI_FUNCS_TIME_BLOCKING) {
-		k_msgq_put((struct k_msgq *)queue, item, K_FOREVER);
-	} else {
-		int ms = block_time_tick * portTICK_PERIOD_MS;
-
-		k_msgq_put((struct k_msgq *)queue, item, K_MSEC(ms));
+    k_timeout_t tout = K_FOREVER;
+	if (block_time_tick != OSI_FUNCS_TIME_BLOCKING) {
+	    int ms = block_time_tick * portTICK_PERIOD_MS;
+	    tout = K_MSEC(ms);
 	}
-	return 1;
+
+    return !k_msgq_put((struct k_msgq *)queue, item, tout);
 }
 
 static int32_t IRAM_ATTR queue_send_from_isr_wrapper(void *queue, void *item, void *hptw)
 {
 	int *hpt = (int *) hptw;
 
-	k_msgq_put((struct k_msgq *)queue, item, K_NO_WAIT);
-	*hpt = 0;
-	return 1;
+    *hpt = 0;
+    return !k_msgq_put((struct k_msgq *)queue, item, K_NO_WAIT);
 }
 
 int32_t queue_send_to_back_wrapper(void *queue, void *item, uint32_t block_time_tick)
@@ -410,14 +395,13 @@ int32_t queue_send_to_front_wrapper(void *queue, void *item, uint32_t block_time
 
 static int32_t queue_recv_wrapper(void *queue, void *item, uint32_t block_time_tick)
 {
-	if (block_time_tick == OSI_FUNCS_TIME_BLOCKING) {
-		k_msgq_get((struct k_msgq *)queue, item, K_FOREVER);
-	} else {
-		int ms = block_time_tick * portTICK_PERIOD_MS;
-
-		k_msgq_get((struct k_msgq *)queue, item, K_MSEC(ms));
+    k_timeout_t tout = K_FOREVER;
+	if (block_time_tick != OSI_FUNCS_TIME_BLOCKING) {
+	    int ms = block_time_tick * portTICK_PERIOD_MS;
+	    tout = K_MSEC(ms);
 	}
-	return 1;
+
+    return !k_msgq_get((struct k_msgq *)queue, item, tout);
 }
 
 static uint32_t event_group_wait_bits_wrapper(void *event, uint32_t bits_to_wait_for, int clear_on_exit, int wait_for_all_bits, uint32_t block_time_tick)
@@ -428,7 +412,7 @@ static uint32_t event_group_wait_bits_wrapper(void *event, uint32_t bits_to_wait
 
 static int32_t task_create_pinned_to_core_wrapper(void *task_func, const char *name, uint32_t stack_depth, void *param, uint32_t prio, void *task_handle, uint32_t core_id)
 {
-    k_thread_stack_t *stack = w_malloc(stack_depth);
+    k_thread_stack_t *stack = k_malloc(stack_depth);
     if (!stack) {
         LOG_ERR("can't alloc stack %d for %s", stack_depth, log_strdup(name));
         return -ENOMEM;
@@ -446,7 +430,7 @@ static int32_t task_create_pinned_to_core_wrapper(void *task_func, const char *n
 
 static int32_t task_create_wrapper(void *task_func, const char *name, uint32_t stack_depth, void *param, uint32_t prio, void *task_handle)
 {
-    k_thread_stack_t *stack = w_malloc(stack_depth);
+    k_thread_stack_t *stack = k_malloc(stack_depth);
     if (!stack) {
         LOG_ERR("can't alloc stack %d for %s", stack_depth, log_strdup(name));
         return -ENOMEM;
@@ -460,6 +444,16 @@ static int32_t task_create_wrapper(void *task_func, const char *name, uint32_t s
 
 	*(int32_t *)task_handle = (int32_t) tid;
 	return 1;
+}
+
+static void task_delete_wrapper(void *task_handle)
+{
+    k_tid_t tid = task_handle;
+    k_thread_abort(tid);
+    /* todo: get stck ptr
+     void *ptr = stack;
+     k_free(stack);
+     */
 }
 
 static int32_t IRAM_ATTR task_ms_to_tick_wrapper(uint32_t ms)
@@ -635,7 +629,7 @@ uint32_t esp_get_free_heap_size(void)
 	return 10000;
 }
 
-unsigned long random(void)
+static unsigned long w_random(void)
 {
 	return sys_rand32_get();
 }
@@ -895,22 +889,22 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._ints_off = intr_off,
 	._is_from_isr = coex_is_in_isr_wrapper,
 	._spin_lock_create = spin_lock_create_wrapper,
-	._spin_lock_delete = w_free,
+	._spin_lock_delete = k_free,
 	._wifi_int_disable = wifi_int_disable_wrapper,
 	._wifi_int_restore = wifi_int_restore_wrapper,
 	._task_yield_from_isr = task_yield_from_isr_wrapper,
 	._semphr_create = semphr_create_wrapper,
-	._semphr_delete = semphr_delete_wrapper,
+	._semphr_delete = k_free,
 	._semphr_take = semphr_take_wrapper,
 	._semphr_give = semphr_give_wrapper,
 	._wifi_thread_semphr_get = wifi_thread_semphr_get_wrapper,
 	._mutex_create = mutex_create_wrapper,
 	._recursive_mutex_create = recursive_mutex_create_wrapper,
-	._mutex_delete = mutex_delete_wrapper,
+	._mutex_delete = k_free,
 	._mutex_lock = mutex_lock_wrapper,
 	._mutex_unlock = mutex_unlock_wrapper,
 	._queue_create = queue_create_wrapper,
-	._queue_delete = delete_wrapper,
+	._queue_delete = k_free,
 	._queue_send = queue_send_wrapper,
 	._queue_send_from_isr = queue_send_from_isr_wrapper,
 	._queue_send_to_back = queue_send_to_back_wrapper,
@@ -924,7 +918,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._event_group_wait_bits = event_group_wait_bits_wrapper,
 	._task_create_pinned_to_core = task_create_pinned_to_core_wrapper,
 	._task_create = task_create_wrapper,
-	._task_delete = delete_wrapper,
+	._task_delete = task_delete_wrapper,
 	._task_delay = vTaskDelay,
 	._task_ms_to_tick = task_ms_to_tick_wrapper,
 	._task_get_current_task = (void *(*)(void))xTaskGetCurrentTaskHandle,
@@ -967,7 +961,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._nvs_erase_key = nvs_erase_key,
 	._get_random = os_get_random,
 	._get_time = get_time_wrapper,
-	._random = random,
+	._random = w_random,
 	._slowclk_cal_get = esp_clk_slowclk_cal_get_wrapper,
 	._log_write = esp_log_write,
 	._log_writev = esp_log_writev,
