@@ -33,10 +33,9 @@ LOG_MODULE_REGISTER(esp32_wifi_adapter, CONFIG_LOG_DEFAULT_LEVEL);
 #include "esp32s2/clk.h"
 #include "esp32s2/rom/rtc.h"
 #include "os.h"
+#include <sys/math_extras.h>
 
 #define portTICK_PERIOD_MS (1000 / 100)
-
-//K_THREAD_STACK_DEFINE(wifi_stack, 4096);
 
 ESP_EVENT_DEFINE_BASE(WIFI_EVENT);
 
@@ -49,66 +48,30 @@ struct wifi_spin_lock {
 
 uint64_t g_wifi_feature_caps;
 
-
-#include <sys/math_extras.h>
-
-K_HEAP_DEFINE(_esp32_wifi_heap, 50*1024);
+#ifdef CONFIG_ESP_SPIRAM
+K_HEAP_DEFINE(_esp32_wifi_heap, 60 * 1024);
 #define _WIFI_HEAP (&_esp32_wifi_heap)
-
-
-static void *z_heap_aligned_alloc(struct k_heap *heap, size_t align, size_t size)
-{
-    void *mem;
-    struct k_heap **heap_ref;
-    size_t __align;
-
-    /*
-     * Adjust the size to make room for our heap reference.
-     * Merge a rewind bit with align value (see sys_heap_aligned_alloc()).
-     * This allows for storing the heap pointer right below the aligned
-     * boundary without wasting any memory.
-     */
-    if (size_add_overflow(size, sizeof(heap_ref), &size)) {
-            return NULL;
-    }
-    __align = align | sizeof(heap_ref);
-
-    mem = k_heap_aligned_alloc(heap, __align, size, K_NO_WAIT);
-    if (mem == NULL) {
-            return NULL;
-    }
-
-    heap_ref = mem;
-    *heap_ref = heap;
-    mem = ++heap_ref;
-    __ASSERT(align == 0 || ((uintptr_t)mem & (align - 1)) == 0,
-             "misaligned memory at %p (align = %zu)", mem, align);
-
-    return mem;
-}
-
-
-static inline void *wifi_aligned_alloc(size_t align, size_t size)
-{
-    __ASSERT(align / sizeof(void *) >= 1
-        && (align % sizeof(void *)) == 0,
-        "align must be a multiple of sizeof(void *)");
-
-    __ASSERT((align & (align - 1)) == 0,
-        "align must be a power of 2");
-    return z_heap_aligned_alloc(_WIFI_HEAP, align, size);
-//    return k_heap_aligned_alloc(_WIFI_HEAP, align | sizeof(void *), size, K_NO_WAIT);
-}
 
 static inline void *w_malloc(size_t size)
 {
-    void *ptr = wifi_aligned_alloc(sizeof(void *), size);
+    void *ptr = k_heap_aligned_alloc(_WIFI_HEAP, sizeof(void *), size, K_NO_WAIT);
 
     if (ptr == NULL) {
         LOG_ERR("memory allocation failed %zu", size);
     }
     return ptr;
 }
+
+static inline void w_free(void *ptr)
+{
+    if (!ptr)
+        return;
+    k_heap_free(_WIFI_HEAP, ptr);
+}
+#else
+#define w_malloc k_malloc
+#define w_free k_free
+#endif
 
 static inline void *w_calloc(size_t nmemb, size_t size)
 {
@@ -127,39 +90,26 @@ static inline void *w_calloc(size_t nmemb, size_t size)
     return ret;
 }
 
-static inline void w_free(void *ptr)
-{
-    if (ptr != NULL) {
-        k_heap_free(_WIFI_HEAP, ptr);
-    }
-}
 
-
-IRAM_ATTR void *wifi_malloc(size_t size)
+void *wifi_malloc(size_t size)
 {
     return w_malloc(size);
 }
 
-IRAM_ATTR void *wifi_realloc(void *ptr, size_t size)
+void *wifi_realloc(void *ptr, size_t size)
 {
 	LOG_ERR("%s not yet supported", __func__);
 	return NULL;
 }
 
-IRAM_ATTR void *wifi_calloc(size_t n, size_t size)
+void *wifi_calloc(size_t n, size_t size)
 {
 	return w_calloc(n, size);
 }
 
-static void *IRAM_ATTR wifi_zalloc_wrapper(size_t size)
+static void *wifi_zalloc_wrapper(size_t size)
 {
-	void *ptr = wifi_calloc(1, size);
-
-	if (ptr) {
-		memset(ptr, 0, size);
-	}
-
-	return ptr;
+    return w_calloc(1, size);
 }
 
 wifi_static_queue_t *wifi_create_queue(int queue_len, int item_size)
@@ -211,7 +161,7 @@ static void wifi_delete_queue_wrapper(void *queue)
 	wifi_delete_queue(queue);
 }
 
-static bool IRAM_ATTR env_is_chip_wrapper(void)
+static bool env_is_chip_wrapper(void)
 {
 #ifdef CONFIG_IDF_ENV_FPGA
 	return false;
@@ -231,7 +181,7 @@ static void *spin_lock_create_wrapper(void)
 	return (void *)wifi_spin_lock;
 }
 
-static uint32_t IRAM_ATTR wifi_int_disable_wrapper(void *wifi_int_mux)
+static uint32_t wifi_int_disable_wrapper(void *wifi_int_mux)
 {
 	unsigned int *int_mux = (unsigned int *) wifi_int_mux;
 
@@ -239,14 +189,14 @@ static uint32_t IRAM_ATTR wifi_int_disable_wrapper(void *wifi_int_mux)
 	return 0;
 }
 
-static void IRAM_ATTR wifi_int_restore_wrapper(void *wifi_int_mux, uint32_t tmp)
+static void wifi_int_restore_wrapper(void *wifi_int_mux, uint32_t tmp)
 {
 	unsigned int *key = (unsigned int *) wifi_int_mux;
 
 	irq_unlock(*key);
 }
 
-static void IRAM_ATTR task_yield_from_isr_wrapper(void)
+static void task_yield_from_isr_wrapper(void)
 {
 	k_yield();
 }
@@ -265,57 +215,35 @@ static void *semphr_create_wrapper(uint32_t max, uint32_t init)
 
 static void *wifi_thread_semphr_get_wrapper(void)
 {
-	struct k_sem *sem = NULL;
+	struct k_sem *sem = k_thread_custom_data_get();
 
-	sem = k_thread_custom_data_get();
-	if (!sem) {
-		sem = (struct k_sem *) k_malloc(sizeof(struct k_sem));
-	    if (!sem) {
-	        LOG_ERR("k_sem alloc");
-	    }
-		if (sem) {
-	        k_sem_init(sem, 0, 1);
-			k_thread_custom_data_set(sem);
-		}
-	}
-	return (void *)sem;
+	if (sem)
+	    return sem;
+
+    sem = (struct k_sem *) k_malloc(sizeof(struct k_sem));
+    if (!sem) {
+        LOG_ERR("k_sem alloc");
+        return NULL;
+    }
+    k_sem_init(sem, 0, 1);
+    k_thread_custom_data_set(sem);
+	return sem;
 }
 
 static int32_t semphr_take_wrapper(void *semphr, uint32_t block_time_tick)
 {
-	if (block_time_tick == OSI_FUNCS_TIME_BLOCKING) {
-		int ret = k_sem_take((struct k_sem *)semphr, K_FOREVER);
+    k_timeout_t tout = K_FOREVER;
 
-		if (ret == 0) {
-			return 1;
-		}
-	} else {
-		int ms = block_time_tick * portTICK_PERIOD_MS;
-		int ret = k_sem_take((struct k_sem *)semphr, K_MSEC(ms));
+	if (block_time_tick != OSI_FUNCS_TIME_BLOCKING)
+        tout = K_MSEC(block_time_tick * portTICK_PERIOD_MS);
 
-		if (ret == 0) {
-			return 1;
-		}
-	}
-	return 0;
+	return !k_sem_take((struct k_sem *)semphr, tout);
 }
 
 static int32_t semphr_give_wrapper(void *semphr)
 {
 	k_sem_give((struct k_sem *) semphr);
 	return 1;
-}
-
-static void *recursive_mutex_create_wrapper(void)
-{
-	struct k_mutex *my_mutex = (struct k_mutex *) k_malloc(sizeof(struct k_mutex));
-    if (!my_mutex) {
-        LOG_ERR("k_mutex alloc");
-        return NULL;
-    }
-
-	k_mutex_init(my_mutex);
-	return (void *)my_mutex;
 }
 
 static void *mutex_create_wrapper(void)
@@ -330,7 +258,7 @@ static void *mutex_create_wrapper(void)
 	return (void *)my_mutex;
 }
 
-static int32_t IRAM_ATTR mutex_lock_wrapper(void *mutex)
+static int32_t mutex_lock_wrapper(void *mutex)
 {
 	struct k_mutex *my_mutex = (struct k_mutex *) mutex;
 
@@ -338,7 +266,7 @@ static int32_t IRAM_ATTR mutex_lock_wrapper(void *mutex)
 	return 0;
 }
 
-static int32_t IRAM_ATTR mutex_unlock_wrapper(void *mutex)
+static int32_t mutex_unlock_wrapper(void *mutex)
 {
 	struct k_mutex *my_mutex = (struct k_mutex *) mutex;
 
@@ -357,8 +285,6 @@ static void *queue_create_wrapper(uint32_t queue_len, uint32_t item_size)
 	}
 
 	k_msgq_init((struct k_msgq *)queue, buf, item_size, queue_len);
-    LOG_ERR("\t \t Queue %p", queue);
-    esp_rom_printf("\t \t Queue %p", queue);
 	return (void *)queue;
 }
 
@@ -373,7 +299,7 @@ static int32_t queue_send_wrapper(void *queue, void *item, uint32_t block_time_t
     return !k_msgq_put((struct k_msgq *)queue, item, tout);
 }
 
-static int32_t IRAM_ATTR queue_send_from_isr_wrapper(void *queue, void *item, void *hptw)
+static int32_t queue_send_from_isr_wrapper(void *queue, void *item, void *hptw)
 {
 	int *hpt = (int *) hptw;
 
@@ -420,7 +346,13 @@ static int32_t task_create_pinned_to_core_wrapper(void *task_func, const char *n
     LOG_ERR("crate %d %s %d (%d, %d)", stack_depth, log_strdup(name), prio, K_LOWEST_THREAD_PRIO, K_HIGHEST_THREAD_PRIO);
 	k_tid_t tid = k_thread_create(&wifi_task_handle, stack, stack_depth,
 				      (k_thread_entry_t)task_func, param, NULL, NULL,
-				      K_HIGHEST_THREAD_PRIO, K_INHERIT_PERMS, K_NO_WAIT);
+				      prio, K_INHERIT_PERMS, K_NO_WAIT);
+
+	if (!tid) {
+        LOG_ERR("can't start %s", log_strdup(name));
+        k_free(stack);
+        return -ENOMEM;
+	}
 
 	k_thread_name_set(tid, name);
 
@@ -440,6 +372,12 @@ static int32_t task_create_wrapper(void *task_func, const char *name, uint32_t s
 				      (k_thread_entry_t)task_func, param, NULL, NULL,
 				      prio, K_INHERIT_PERMS, K_NO_WAIT);
 
+    if (!tid) {
+        LOG_ERR("can't start %s", log_strdup(name));
+        k_free(stack);
+        return -ENOMEM;
+    }
+
 	k_thread_name_set(tid, name);
 
 	*(int32_t *)task_handle = (int32_t) tid;
@@ -456,14 +394,15 @@ static void task_delete_wrapper(void *task_handle)
      */
 }
 
-static int32_t IRAM_ATTR task_ms_to_tick_wrapper(uint32_t ms)
+static int32_t task_ms_to_tick_wrapper(uint32_t ms)
 {
 	return (int32_t)(ms / portTICK_PERIOD_MS);
 }
 
 static int32_t task_get_max_priority_wrapper(void)
 {
-	return (int32_t)(4);
+//	return (int32_t)(4);
+    return K_HIGHEST_APPLICATION_THREAD_PRIO;
 }
 
 static int32_t esp_event_post_wrapper(const char* event_base, int32_t event_id, void* event_data, size_t event_data_size, uint32_t ticks_to_wait)
@@ -472,26 +411,26 @@ static int32_t esp_event_post_wrapper(const char* event_base, int32_t event_id, 
 	return 0;
 }
 
-static void IRAM_ATTR wifi_apb80m_request_wrapper(void)
+static void wifi_apb80m_request_wrapper(void)
 {
 #ifdef CONFIG_PM_ENABLE
 	wifi_apb80m_request();
 #endif
 }
 
-static void IRAM_ATTR wifi_apb80m_release_wrapper(void)
+static void wifi_apb80m_release_wrapper(void)
 {
 #ifdef CONFIG_PM_ENABLE
 	wifi_apb80m_release();
 #endif
 }
 
-static void IRAM_ATTR timer_arm_wrapper(void *timer, uint32_t tmout, bool repeat)
+static void timer_arm_wrapper(void *timer, uint32_t tmout, bool repeat)
 {
 	ets_timer_arm(timer, tmout, repeat);
 }
 
-static void IRAM_ATTR timer_disarm_wrapper(void *timer)
+static void timer_disarm_wrapper(void *timer)
 {
 	ets_timer_disarm(timer);
 }
@@ -506,7 +445,7 @@ static void timer_setfn_wrapper(void *ptimer, void *pfunction, void *parg)
 	ets_timer_setfn(ptimer, pfunction, parg);
 }
 
-static void IRAM_ATTR timer_arm_us_wrapper(void *ptimer, uint32_t us, bool repeat)
+static void timer_arm_us_wrapper(void *ptimer, uint32_t us, bool repeat)
 {
 	ets_timer_arm_us(ptimer, us, repeat);
 }
@@ -525,7 +464,7 @@ static uint32_t esp_clk_slowclk_cal_get_wrapper(void)
 	return (REG_READ(RTC_SLOW_CLK_CAL_REG) >> (RTC_CLK_CAL_FRACT - SOC_WIFI_LIGHT_SLEEP_CLK_WIDTH));
 }
 
-static void *IRAM_ATTR malloc_internal_wrapper(size_t size)
+static void *malloc_internal_wrapper(size_t size)
 {
 	void *ptr = w_malloc(size);
 
@@ -535,18 +474,18 @@ static void *IRAM_ATTR malloc_internal_wrapper(size_t size)
 	return ptr;
 }
 
-static void *IRAM_ATTR realloc_internal_wrapper(void *ptr, size_t size)
+static void *realloc_internal_wrapper(void *ptr, size_t size)
 {
 	LOG_ERR("%s not yet supported", __func__);
 	return NULL;
 }
 
-static void *IRAM_ATTR calloc_internal_wrapper(size_t n, size_t size)
+static void *calloc_internal_wrapper(size_t n, size_t size)
 {
 	return w_calloc(n, size);
 }
 
-static void *IRAM_ATTR zalloc_internal_wrapper(size_t size)
+static void *zalloc_internal_wrapper(size_t size)
 {
 	void *ptr = calloc_internal_wrapper(1, size);
 
@@ -744,7 +683,7 @@ static void coex_disable_wrapper(void)
 #endif
 }
 
-static IRAM_ATTR uint32_t coex_status_get_wrapper(void)
+static uint32_t coex_status_get_wrapper(void)
 {
 #if CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE
 	return coex_status_get();
@@ -769,7 +708,7 @@ static int coex_wifi_request_wrapper(uint32_t event, uint32_t latency, uint32_t 
 #endif
 }
 
-static IRAM_ATTR int coex_wifi_release_wrapper(uint32_t event)
+static int coex_wifi_release_wrapper(uint32_t event)
 {
 #if CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE
 	return coex_wifi_release(event);
@@ -787,7 +726,7 @@ static int coex_wifi_channel_set_wrapper(uint8_t primary, uint8_t secondary)
 #endif
 }
 
-static IRAM_ATTR int coex_event_duration_get_wrapper(uint32_t event, uint32_t *duration)
+static int coex_event_duration_get_wrapper(uint32_t event, uint32_t *duration)
 {
 #if CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE
 	return coex_event_duration_get(event, duration);
@@ -815,7 +754,7 @@ static void coex_schm_status_bit_set_wrapper(uint32_t type, uint32_t status)
 #endif
 }
 
-static IRAM_ATTR int coex_schm_interval_set_wrapper(uint32_t interval)
+static int coex_schm_interval_set_wrapper(uint32_t interval)
 {
 #if CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE
 	return coex_schm_interval_set(interval);
@@ -869,7 +808,7 @@ static int coex_schm_curr_phase_idx_get_wrapper(void)
 #endif
 }
 
-static void IRAM_ATTR esp_empty_wrapper(void)
+static void esp_empty_wrapper(void)
 {
 
 }
@@ -899,7 +838,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._semphr_give = semphr_give_wrapper,
 	._wifi_thread_semphr_get = wifi_thread_semphr_get_wrapper,
 	._mutex_create = mutex_create_wrapper,
-	._recursive_mutex_create = recursive_mutex_create_wrapper,
+	._recursive_mutex_create = mutex_create_wrapper,
 	._mutex_delete = k_free,
 	._mutex_lock = mutex_lock_wrapper,
 	._mutex_unlock = mutex_unlock_wrapper,
@@ -997,7 +936,6 @@ wifi_osi_funcs_t g_wifi_osi_funcs = {
 	._coex_schm_curr_phase_idx_get = coex_schm_curr_phase_idx_get_wrapper,
 	._magic = ESP_WIFI_OS_ADAPTER_MAGIC,
 };
-
 esp_err_t esp_wifi_init(const wifi_init_config_t *config)
 {
 #if CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE
